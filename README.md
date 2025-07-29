@@ -150,6 +150,5 @@ MIT License
 
 Let your health data talk back — smarter, friendlier, and securely.
 
-```
 
 ---
