@@ -13,6 +13,7 @@ struct ContentView: View {
     @State private var inputText = ""
     @State private var isSending = false
     @State private var healthAuthorized = false
+    @FocusState private var isTextFieldFocused: Bool
     
     private var healthStore = HKHealthStore()
     
@@ -51,6 +52,7 @@ struct ContentView: View {
                 HStack(spacing: 10) {
                     TextField("Ask AI about your health...", text: $inputText)
                         .textFieldStyle(RoundedBorderTextFieldStyle())
+                        .focused($isTextFieldFocused)
                     
                     Button("Ask AI") {
                         guard !isSending, !inputText.isEmpty else { return }
@@ -109,8 +111,13 @@ struct ContentView: View {
             return
         }
         
+        let userInput = inputText
+        
+        inputText = ""
+        isTextFieldFocused = false
+        
         isSending = true
-        messages.append(ChatMessage(text: inputText, isUser: true))
+        messages.append(ChatMessage(text: userInput, isUser: true))
         
         fetchHealthSummary { structuredSummary in
             let userPrompt = """
@@ -118,13 +125,12 @@ struct ContentView: View {
             \(structuredSummary)
 
             Question:
-            \(inputText)
+            \(userInput)
             """
             
             sendToAzureOpenAIChat(userPrompt: userPrompt) { response in
                 DispatchQueue.main.async {
                     messages.append(ChatMessage(text: response, isUser: false))
-                    inputText = ""
                     isSending = false
                 }
             }
@@ -194,7 +200,7 @@ struct ContentView: View {
     }
     
     private func sendToAzureOpenAIChat(userPrompt: String, completion: @escaping (String) -> Void) {
-        guard let url = URL(string: "OpenAI-URL-HERE") else {
+        guard let url = URL(string: "YOUR-OPENAI-URL") else {
             completion("Invalid Azure URL")
             return
         }
