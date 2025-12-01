@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		FB2DB2882ED6514D003D5FDA /* FirebaseAnalytics in Frameworks */ = {isa = PBXBuildFile; productRef = FB2DB2872ED6514D003D5FDA /* FirebaseAnalytics */; };
+		FB2DB28A2ED654A8003D5FDA /* FirebaseAuth in Frameworks */ = {isa = PBXBuildFile; productRef = FB2DB2892ED654A8003D5FDA /* FirebaseAuth */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		FBB9B4862DC03AEC0095DF69 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -65,6 +70,8 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				FB2DB2882ED6514D003D5FDA /* FirebaseAnalytics in Frameworks */,
+				FB2DB28A2ED654A8003D5FDA /* FirebaseAuth in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -125,6 +132,8 @@
 			);
 			name = HealthSync;
 			packageProductDependencies = (
+				FB2DB2872ED6514D003D5FDA /* FirebaseAnalytics */,
+				FB2DB2892ED654A8003D5FDA /* FirebaseAuth */,
 			);
 			productName = HealthSync;
 			productReference = FBB9B4782DC03AEB0095DF69 /* HealthSync.app */;
@@ -208,6 +217,9 @@
 			);
 			mainGroup = FBB9B46F2DC03AEB0095DF69;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				FB2DB2862ED6514D003D5FDA /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = FBB9B4792DC03AEB0095DF69 /* Products */;
 			projectDirPath = "";
@@ -577,6 +589,30 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		FB2DB2862ED6514D003D5FDA /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/firebase/firebase-ios-sdk";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 12.6.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		FB2DB2872ED6514D003D5FDA /* FirebaseAnalytics */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FB2DB2862ED6514D003D5FDA /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAnalytics;
+		};
+		FB2DB2892ED654A8003D5FDA /* FirebaseAuth */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = FB2DB2862ED6514D003D5FDA /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
+			productName = FirebaseAuth;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = FBB9B4702DC03AEB0095DF69 /* Project object */;
 }

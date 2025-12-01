@@ -1,5 +1,7 @@
 import SwiftUI
 import HealthKit
+import FirebaseAuth
+
 
 struct ChatMessage: Identifiable {
     let id = UUID()
@@ -18,61 +20,54 @@ struct ContentView: View {
     private var healthStore = HKHealthStore()
     
     var body: some View {
-        NavigationView {
-            VStack(spacing: 15) {
-                VStack(spacing: 5) {
-                    Text("AI Health Agent")
-                        .font(.headline)
-                    NavigationLink(destination: LegalView()) {
-                        Text("Terms & Privacy")
-                            .font(.footnote)
-                            .foregroundColor(.blue)
-                    }
-                }
-                .padding(.top)
-                
-                ScrollView {
-                    LazyVStack {
-                        ForEach(messages) { message in
-                            HStack {
-                                if message.isUser { Spacer() }
-                                Text(.init(cleanMarkdownTitles(message.text)))
-                                    .padding()
-                                    .background(message.isUser ? Color.blue : Color.gray.opacity(0.2))
-                                    .cornerRadius(10)
-                                    .foregroundColor(message.isUser ? .white : .primary)
-                                    .multilineTextAlignment(.leading)
-                                if !message.isUser { Spacer() }
-                            }
-                            .padding(.horizontal)
+        VStack(spacing: 15) {
+
+            // 🔹 Chat messages – full height except bottom input
+            ScrollView {
+                LazyVStack {
+                    ForEach(messages) { message in
+                        HStack {
+                            if message.isUser { Spacer() }
+                            Text(.init(cleanMarkdownTitles(message.text)))
+                                .padding()
+                                .background(message.isUser ? Color.blue : Color.gray.opacity(0.2))
+                                .cornerRadius(10)
+                                .foregroundColor(message.isUser ? .white : .primary)
+                                .multilineTextAlignment(.leading)
+                            if !message.isUser { Spacer() }
                         }
+                        .padding(.horizontal)
                     }
                 }
-                
-                HStack(spacing: 10) {
-                    TextField("Ask AI about your health...", text: $inputText)
-                        .textFieldStyle(RoundedBorderTextFieldStyle())
-                        .focused($isTextFieldFocused)
-                    
-                    Button("Ask AI") {
-                        guard !isSending, !inputText.isEmpty else { return }
-                        askAI()
-                    }
-                    .disabled(isSending)
-                    
-                    if isSending {
-                        ProgressView()
-                            .frame(width: 20, height: 20)
-                    }
+            }
+
+            // 🔹 Input row
+            HStack(spacing: 10) {
+                TextField("Ask AI about your health...", text: $inputText)
+                    .textFieldStyle(RoundedBorderTextFieldStyle())
+                    .focused($isTextFieldFocused)
+
+                Button("Ask AI") {
+                    guard !isSending, !inputText.isEmpty else { return }
+                    askAI()
                 }
-                .padding()
+                .disabled(isSending)
+
+                if isSending {
+                    ProgressView()
+                        .frame(width: 20, height: 20)
+                }
             }
-            .padding([.leading, .trailing])
-            .onAppear {
-                authorizeAndFetchIfNeeded()
-            }
+            .padding()
+        }
+        .padding([.leading, .trailing])
+        .onAppear {
+            authorizeAndFetchIfNeeded()
         }
     }
+
+
+
     
     private func authorizeAndFetchIfNeeded() {
         let typesToRead: Set = [
@@ -112,7 +107,6 @@ struct ContentView: View {
         }
         
         let userInput = inputText
-        
         inputText = ""
         isTextFieldFocused = false
         
@@ -120,18 +114,10 @@ struct ContentView: View {
         messages.append(ChatMessage(text: userInput, isUser: true))
         
         fetchHealthSummary { structuredSummary in
-            let userPrompt = """
-            Patient Health Data (JSON):
-            \(structuredSummary)
-
-            Question:
-            \(userInput)
-            """
-            
-            sendToAzureOpenAIChat(userPrompt: userPrompt) { response in
+            sendToBackend(healthSummary: structuredSummary, question: userInput) { response in
                 DispatchQueue.main.async {
-                    messages.append(ChatMessage(text: response, isUser: false))
-                    isSending = false
+                    self.messages.append(ChatMessage(text: response, isUser: false))
+                    self.isSending = false
                 }
             }
         }
@@ -199,101 +185,77 @@ struct ContentView: View {
         }
     }
     
-    private func sendToAzureOpenAIChat(userPrompt: String, completion: @escaping (String) -> Void) {
-        guard let url = URL(string: "YOUR-OPENAI-URL") else {
-            completion("Invalid Azure URL")
+    private func sendToBackend(healthSummary: String, question: String, completion: @escaping (String) -> Void) {
+        guard let user = Auth.auth().currentUser else {
+            completion("You need to log in before using the AI.")
             return
         }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.addValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.addValue("YOUR-API-KEY", forHTTPHeaderField: "api-key")
-
-        let body: [String: Any] = [
-            "messages": [
-                [
-                    "role": "system",
-                    "content": "You are a compassionate, professional health assistant combining the expertise of a certified fitness trainer and a general practitioner doctor. Your goal is to help users understand their health trends and provide safe, realistic, and personalized advice based on their body data, such as weight history, step count, heart rate, and calorie activity levels. You speak in a friendly, supportive, and encouraging tone. You always prioritize the user's safety, long-term well-being, and sustainable habit-building. The system already knows the user's health data — the frontend application automatically sends structured health data (e.g., from Apple Health). Do not mention technical terms like \"JSON\", \"data file\", or \"based on what you sent\". Instead, speak naturally, as if you're familiar with the user's recent health and lifestyle habits."
-                ],
-                ["role": "user", "content": userPrompt]
-            ],
-            "temperature": 0.7
-        ]
-
-        guard let data = try? JSONSerialization.data(withJSONObject: body) else {
-            completion("Failed to encode request.")
-            return
-        }
-
-        request.httpBody = data
-
-        URLSession.shared.dataTask(with: request) { data, _, error in
+        
+        user.getIDToken { idToken, error in
             if let error = error {
-                completion("Network error: \(error.localizedDescription)")
+                completion("Failed to get ID token: \(error.localizedDescription)")
                 return
             }
-
-            guard let data = data else {
-                completion("No data returned from Azure.")
+            
+            guard let idToken = idToken else {
+                completion("No ID token available.")
                 return
             }
-
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let choices = json["choices"] as? [[String: Any]],
-               let message = choices.first?["message"] as? [String: Any],
-               let content = message["content"] as? String {
-                completion(content)
-            } else {
-                let rawResponse = String(data: data, encoding: .utf8) ?? "Unreadable content"
-                print("🧾 Raw Azure Response: \(rawResponse)")
-                completion("Azure returned no usable response.")
+            
+            // For simulator talking to your Mac:
+            let urlString = "YOUR-API-KEY"
+            guard let url = URL(string: urlString) else {
+                completion("Backend URL is invalid.")
+                return
             }
-        }.resume()
+            
+            var request = URLRequest(url: url)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("Bearer \(idToken)", forHTTPHeaderField: "Authorization")
+            
+            let body: [String: Any] = [
+                "health_summary": healthSummary,
+                "question": question
+            ]
+            
+            guard let data = try? JSONSerialization.data(withJSONObject: body) else {
+                completion("Failed to encode request.")
+                return
+            }
+            
+            request.httpBody = data
+            
+            URLSession.shared.dataTask(with: request) { data, _, error in
+                if let error = error {
+                    completion("Network error: \(error.localizedDescription)")
+                    return
+                }
+                
+                guard let data = data else {
+                    completion("No data returned from backend.")
+                    return
+                }
+                
+                if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                   let reply = json["reply"] as? String {
+                    completion(reply)
+                } else {
+                    let raw = String(data: data, encoding: .utf8) ?? "Unreadable response"
+                    print("🧾 Raw backend response:", raw)
+                    completion("Backend returned no usable reply.")
+                }
+            }.resume()
+        }
     }
-}
-
-func cleanMarkdownTitles(_ markdown: String) -> String {
-    let lines = markdown.components(separatedBy: .newlines)
-    return lines.map {
-        $0.trimmingCharacters(in: .whitespaces).hasPrefix("#") ?
+    
+    
+    func cleanMarkdownTitles(_ markdown: String) -> String {
+        let lines = markdown.components(separatedBy: .newlines)
+        return lines.map {
+            $0.trimmingCharacters(in: .whitespaces).hasPrefix("#") ?
             $0.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression) :
             $0
-    }.joined(separator: "\n")
-}
-
-struct LegalView: View {
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 15) {
-                Text("Terms of Use")
-                    .font(.title2)
-                    .bold()
-
-                Text("""
-                By using the AI Health Agent app, you agree to the following terms:
-
-                • The app is provided “as is” without warranties of any kind.
-                • The developer and distributor of this app are not responsible for any direct or indirect damages, losses, or liabilities resulting from use of the app, including but not limited to health decisions made based on its outputs.
-                • The app does not provide medical diagnoses or treatment. For any health concerns, please consult a licensed medical professional.
-                • You use this app at your own risk.
-                """)
-
-                Text("Privacy Policy")
-                    .font(.title2)
-                    .bold()
-
-                Text("""
-                • This app accesses your HealthKit data on your device (e.g., weight, steps, heart rate) only with your explicit permission.
-                • No health data is stored or saved by the developer or app backend.
-                • Your health data is sent directly to OpenAI’s API to generate responses. The developer has no access or control over how OpenAI processes this information.
-                • The developer and distributor are not liable for any misuse, loss, or exposure of data during this process.
-
-                If you do not agree to these terms, please discontinue use of the app.
-                """)
-            }
-            .padding()
-        }
-        .navigationTitle("Terms & Privacy")
+        }.joined(separator: "\n")
     }
 }
