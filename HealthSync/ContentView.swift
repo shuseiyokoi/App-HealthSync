@@ -15,6 +15,9 @@ struct ContentView: View {
     @State private var inputText = ""
     @State private var isSending = false
     @State private var healthAuthorized = false
+    // First successful send delivers the full 18-month history so the backend
+    // can build its long-term memory; afterwards only a recent window is sent.
+    @AppStorage("hasCompletedInitialHealthSync") private var hasCompletedInitialSync = false
     @FocusState private var isTextFieldFocused: Bool
     
     private var healthStore = HKHealthStore()
@@ -70,10 +73,17 @@ struct ContentView: View {
 
     
     private func authorizeAndFetchIfNeeded() {
-        let typesToRead: Set = [
-            HKObjectType.quantityType(forIdentifier: .bodyMass)!,
-            HKObjectType.quantityType(forIdentifier: .stepCount)!
+        let quantityIdentifiers: [HKQuantityTypeIdentifier] = [
+            .bodyMass, .stepCount, .activeEnergyBurned, .basalEnergyBurned,
+            .heartRate, .restingHeartRate, .walkingHeartRateAverage, .vo2Max,
+            .flightsClimbed, .distanceWalkingRunning, .appleExerciseTime, .walkingSpeed
         ]
+        var typesToRead: Set<HKObjectType> = [HKObjectType.workoutType()]
+        for identifier in quantityIdentifiers {
+            if let type = HKObjectType.quantityType(forIdentifier: identifier) {
+                typesToRead.insert(type)
+            }
+        }
         healthStore.requestAuthorization(toShare: nil, read: typesToRead) { success, _ in
             DispatchQueue.main.async {
                 healthAuthorized = success
@@ -113,9 +123,13 @@ struct ContentView: View {
         isSending = true
         messages.append(ChatMessage(text: userInput, isUser: true))
         
-        fetchHealthSummary { structuredSummary in
-            sendToBackend(healthSummary: structuredSummary, question: userInput) { response in
+        let isInitialSync = !hasCompletedInitialSync
+        fetchHealthSummary(fullHistory: isInitialSync) { structuredSummary in
+            sendToBackend(healthSummary: structuredSummary, question: userInput) { response, success in
                 DispatchQueue.main.async {
+                    if success && isInitialSync {
+                        self.hasCompletedInitialSync = true
+                    }
                     self.messages.append(ChatMessage(text: response, isUser: false))
                     self.isSending = false
                 }
@@ -123,60 +137,107 @@ struct ContentView: View {
         }
     }
     
-    private func fetchHealthSummary(completion: @escaping (String) -> Void) {
+    /// Builds the health payload as one aggregated value per interval per metric.
+    /// `fullHistory: true` covers 18 months at weekly granularity (initial sync);
+    /// `false` covers the last 30 days at daily granularity. Aggregation keeps
+    /// the payload within the backend LLM's token limit — raw samples do not fit.
+    private func fetchHealthSummary(fullHistory: Bool, completion: @escaping (String) -> Void) {
         let calendar = Calendar.current
-        let startDate = calendar.date(byAdding: .month, value: -18, to: Date()) ?? Date()
-        let predicate = HKQuery.predicateForSamples(withStart: startDate, end: Date(), options: [])
-        
-        let healthDataTypes: [(HKQuantityTypeIdentifier, String, (HKQuantity) -> Double)] = [
-            (.bodyMass, "weights", { $0.doubleValue(for: .gramUnit(with: .kilo)) }),
-            (.stepCount, "steps", { $0.doubleValue(for: .count()) }),
-            (.activeEnergyBurned, "activeEnergy", { $0.doubleValue(for: .kilocalorie()) }),
-            (.heartRate, "heartRates", { $0.doubleValue(for: HKUnit.count().unitDivided(by: .minute())) }),
-            (.restingHeartRate, "restingHeartRates", { $0.doubleValue(for: HKUnit.count().unitDivided(by: .minute())) }),
-            (.walkingHeartRateAverage, "walkingHeartRates", { $0.doubleValue(for: HKUnit.count().unitDivided(by: .minute())) }),
-            (.vo2Max, "vo2Max", {
-                $0.doubleValue(for: HKUnit.liter().unitDivided(by: .minute()).unitDivided(by: .gramUnit(with: .kilo)))
-            }),
-            (.flightsClimbed, "flightsClimbed", { $0.doubleValue(for: .count()) }),
-            (.distanceWalkingRunning, "distanceWalkingRunning", { $0.doubleValue(for: .meter()) })
+        let now = Date()
+        let monthsBack = fullHistory ? -18 : -1
+        let intervalDays = fullHistory ? 7 : 1
+        let startDate = calendar.startOfDay(for: calendar.date(byAdding: .month, value: monthsBack, to: now) ?? now)
+        let predicate = HKQuery.predicateForSamples(withStart: startDate, end: now, options: [])
+
+        // (identifier, JSON key, daily aggregation, unit)
+        let metrics: [(HKQuantityTypeIdentifier, String, HKStatisticsOptions, HKUnit)] = [
+            (.bodyMass, "weightKg", .discreteAverage, .gramUnit(with: .kilo)),
+            (.stepCount, "steps", .cumulativeSum, .count()),
+            (.activeEnergyBurned, "activeEnergyKcal", .cumulativeSum, .kilocalorie()),
+            (.basalEnergyBurned, "basalEnergyKcal", .cumulativeSum, .kilocalorie()),
+            (.heartRate, "avgHeartRateBpm", .discreteAverage, HKUnit.count().unitDivided(by: .minute())),
+            (.restingHeartRate, "restingHeartRateBpm", .discreteAverage, HKUnit.count().unitDivided(by: .minute())),
+            (.walkingHeartRateAverage, "walkingHeartRateBpm", .discreteAverage, HKUnit.count().unitDivided(by: .minute())),
+            (.vo2Max, "vo2Max", .discreteAverage, HKUnit.liter().unitDivided(by: .minute()).unitDivided(by: .gramUnit(with: .kilo))),
+            (.flightsClimbed, "flightsClimbed", .cumulativeSum, .count()),
+            (.distanceWalkingRunning, "distanceWalkingRunningKm", .cumulativeSum, .meterUnit(with: .kilo)),
+            (.appleExerciseTime, "exerciseMinutes", .cumulativeSum, .minute()),
+            (.walkingSpeed, "walkingSpeedKmh", .discreteAverage, HKUnit.meterUnit(with: .kilo).unitDivided(by: .hour()))
         ]
-        
-        var resultsDict: [String: [[String: Any]]] = [:]
-        var dailyCalories: [String: Double] = [:]
+
+        var resultsDict: [String: Any] = [:]
         let group = DispatchGroup()
-        
-        for (identifier, key, unitConverter) in healthDataTypes {
-            guard let type = HKQuantityType.quantityType(forIdentifier: identifier) else {
-                resultsDict[key] = []
-                continue
-            }
-            
+        // Query handlers fire on background threads; serialize dictionary writes
+        let resultsQueue = DispatchQueue(label: "com.healthsync.healthResults")
+
+        for (identifier, key, options, unit) in metrics {
+            guard let type = HKQuantityType.quantityType(forIdentifier: identifier) else { continue }
+
             group.enter()
-            let sort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
-            let query = HKSampleQuery(sampleType: type, predicate: predicate, limit: 550, sortDescriptors: [sort]) { _, samples, _ in
+            let query = HKStatisticsCollectionQuery(
+                quantityType: type,
+                quantitySamplePredicate: predicate,
+                options: options,
+                anchorDate: startDate,
+                intervalComponents: DateComponents(day: intervalDays)
+            )
+            query.initialResultsHandler = { _, collection, _ in
+                let dayFormatter = DateFormatter()
+                dayFormatter.dateFormat = "yyyy-MM-dd"
                 var dataPoints: [[String: Any]] = []
-                if let quantitySamples = samples as? [HKQuantitySample] {
-                    for sample in quantitySamples {
-                        let value = unitConverter(sample.quantity)
-                        guard value.isFinite, value > 0 else { continue }
-                        let timestamp = ISO8601DateFormatter().string(from: sample.endDate)
-                        dataPoints.append(["value": value, "timestamp": timestamp])
-                        if identifier == .activeEnergyBurned {
-                            let day = DateFormatter.localizedString(from: sample.endDate, dateStyle: .short, timeStyle: .none)
-                            dailyCalories[day, default: 0] += value
-                        }
-                    }
+                collection?.enumerateStatistics(from: startDate, to: now) { stats, _ in
+                    let quantity = options == .cumulativeSum ? stats.sumQuantity() : stats.averageQuantity()
+                    guard let quantity = quantity else { return }
+                    let value = quantity.doubleValue(for: unit)
+                    guard value.isFinite, value > 0 else { return }
+                    dataPoints.append([
+                        "date": dayFormatter.string(from: stats.startDate),
+                        "value": (value * 100).rounded() / 100
+                    ])
                 }
-                resultsDict[key] = dataPoints
+                resultsQueue.sync { resultsDict[key] = dataPoints }
                 group.leave()
             }
             healthStore.execute(query)
         }
-        
+
+        group.enter()
+        let workoutSort = NSSortDescriptor(key: HKSampleSortIdentifierEndDate, ascending: false)
+        let workoutLimit = fullHistory ? 200 : 50
+        let workoutQuery = HKSampleQuery(sampleType: HKObjectType.workoutType(), predicate: predicate, limit: workoutLimit, sortDescriptors: [workoutSort]) { _, samples, _ in
+            let dayFormatter = DateFormatter()
+            dayFormatter.dateFormat = "yyyy-MM-dd"
+            var workoutPoints: [[String: Any]] = []
+            if let workouts = samples as? [HKWorkout] {
+                for workout in workouts {
+                    var point: [String: Any] = [
+                        "type": workout.workoutActivityType.displayName,
+                        "durationMinutes": (workout.duration / 60).rounded(),
+                        "date": dayFormatter.string(from: workout.endDate)
+                    ]
+                    if let energyType = HKQuantityType.quantityType(forIdentifier: .activeEnergyBurned),
+                       let calories = workout.statistics(for: energyType)?.sumQuantity()?.doubleValue(for: .kilocalorie()) {
+                        point["calories"] = calories.rounded()
+                    }
+                    workoutPoints.append(point)
+                }
+            }
+            resultsQueue.sync { resultsDict["workouts"] = workoutPoints }
+            group.leave()
+        }
+        healthStore.execute(workoutQuery)
+
         group.notify(queue: .main) {
-            resultsDict["dailyCaloriesEstimate"] = dailyCalories.map { ["date": $0.key, "calories": $0.value] }
-            if let jsonData = try? JSONSerialization.data(withJSONObject: resultsDict, options: .prettyPrinted),
+            let dayFormatter = DateFormatter()
+            dayFormatter.dateFormat = "yyyy-MM-dd"
+            resultsDict["dataRange"] = [
+                "from": dayFormatter.string(from: startDate),
+                "to": dayFormatter.string(from: now),
+                "granularity": fullHistory
+                    ? "one aggregated value per week (sums for counts, averages for rates); date marks the start of the week"
+                    : "one aggregated value per day (sums for counts, averages for rates)"
+            ]
+            if let jsonData = try? JSONSerialization.data(withJSONObject: resultsDict),
                let jsonString = String(data: jsonData, encoding: .utf8) {
                 completion(jsonString)
             } else {
@@ -185,27 +246,27 @@ struct ContentView: View {
         }
     }
     
-    private func sendToBackend(healthSummary: String, question: String, completion: @escaping (String) -> Void) {
+    private func sendToBackend(healthSummary: String, question: String, completion: @escaping (String, Bool) -> Void) {
         guard let user = Auth.auth().currentUser else {
-            completion("You need to log in before using the AI.")
+            completion("You need to log in before using the AI.", false)
             return
         }
-        
+
         user.getIDToken { idToken, error in
             if let error = error {
-                completion("Failed to get ID token: \(error.localizedDescription)")
+                completion("Failed to get ID token: \(error.localizedDescription)", false)
                 return
             }
-            
+
             guard let idToken = idToken else {
-                completion("No ID token available.")
+                completion("No ID token available.", false)
                 return
             }
             
             // For simulator talking to your Mac:
-            let urlString = "YOUR-API-KEY"
+            let urlString = "YOUR-BACKEND-URL/chat/message"
             guard let url = URL(string: urlString) else {
-                completion("Backend URL is invalid.")
+                completion("Backend URL is invalid.", false)
                 return
             }
             
@@ -220,30 +281,30 @@ struct ContentView: View {
             ]
             
             guard let data = try? JSONSerialization.data(withJSONObject: body) else {
-                completion("Failed to encode request.")
+                completion("Failed to encode request.", false)
                 return
             }
-            
+
             request.httpBody = data
-            
+
             URLSession.shared.dataTask(with: request) { data, _, error in
                 if let error = error {
-                    completion("Network error: \(error.localizedDescription)")
+                    completion("Network error: \(error.localizedDescription)", false)
                     return
                 }
-                
+
                 guard let data = data else {
-                    completion("No data returned from backend.")
+                    completion("No data returned from backend.", false)
                     return
                 }
-                
+
                 if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let reply = json["reply"] as? String {
-                    completion(reply)
+                    completion(reply, true)
                 } else {
                     let raw = String(data: data, encoding: .utf8) ?? "Unreadable response"
                     print("🧾 Raw backend response:", raw)
-                    completion("Backend returned no usable reply.")
+                    completion("Backend returned no usable reply.", false)
                 }
             }.resume()
         }
@@ -257,5 +318,32 @@ struct ContentView: View {
             $0.replacingOccurrences(of: "^#+\\s*", with: "", options: .regularExpression) :
             $0
         }.joined(separator: "\n")
+    }
+}
+
+extension HKWorkoutActivityType {
+    var displayName: String {
+        switch self {
+        case .running: return "running"
+        case .walking: return "walking"
+        case .cycling: return "cycling"
+        case .swimming: return "swimming"
+        case .hiking: return "hiking"
+        case .yoga: return "yoga"
+        case .pilates: return "pilates"
+        case .functionalStrengthTraining, .traditionalStrengthTraining: return "strengthTraining"
+        case .highIntensityIntervalTraining: return "hiit"
+        case .coreTraining: return "coreTraining"
+        case .elliptical: return "elliptical"
+        case .rowing: return "rowing"
+        case .stairClimbing: return "stairClimbing"
+        case .crossTraining: return "crossTraining"
+        case .dance, .socialDance, .cardioDance: return "dance"
+        case .tennis: return "tennis"
+        case .basketball: return "basketball"
+        case .soccer: return "soccer"
+        case .golf: return "golf"
+        default: return "other"
+        }
     }
 }

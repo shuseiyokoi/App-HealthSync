@@ -12,7 +12,7 @@ Behind the scenes, HealthSync uses:
 * **Azure PostgreSQL** to store chat history & summaries
 * **Azure OpenAI (GPT-4o)** for the brain
 
-🔗 **TestFlight**: [Join Here](https://testflight.apple.com/join/xBj899wE)
+🔗 **TestFlight**: [Join Here](https://testflight.apple.com/join/xBj899wE) · **Version 2.1** · 30+ TestFlight users, 160+ sessions
 📝 **Full Blog**: [Building AI Health Agent on Notion](https://shuseiyokoi.notion.site/Building-iOS-AI-Health-Agent-App-Using-Azure-OpenAI-SwiftUI-1ecf61fbe85c80e58c42c8df31fafc4f)
 
 <img width="1736" height="780" alt="image (10)" src="https://github.com/user-attachments/assets/249ec739-0668-445e-bf75-b1c0f355cd1d" />
@@ -31,7 +31,7 @@ You can ask things like:
 HealthSync:
 
 1. Reads your **Apple Health / HealthKit** metrics (with your permission)
-2. Builds a structured summary (up to ~18 months)
+2. Aggregates it into a compact summary: **weekly values over 18 months** on the first sync, then **daily values for the last month**
 3. Sends it with your question to a secure backend
 4. The backend calls **GPT-4o** with:
 
@@ -54,7 +54,7 @@ The agent *remembers you* via:
 * Built with **SwiftUI**
 * Uses **HealthKit** to read:
 
-  * Weight, steps, active energy, heart rate, VO₂ max, etc.
+  * Weight, steps, active & basal energy, heart rate, VO₂ max, exercise minutes, walking speed, workouts, etc.
 * Uses **Firebase Auth** (email/password) for login
 * Renders messages in a simple chat UI
 * Includes an in-app **Terms & Privacy** screen
@@ -62,7 +62,7 @@ The agent *remembers you* via:
 On each question, the app:
 
 1. Ensures HealthKit permission is granted
-2. Fetches up to 18 months of relevant data
+2. Fetches the relevant data with `HKStatisticsCollectionQuery` and aggregates it per interval (sums for counts, averages for rates), so the payload fits the LLM's token limit — raw samples do not
 3. Serializes it into JSON
 4. Retrieves a Firebase **ID token**
 5. Sends a `POST /chat/message` request to the backend with:
@@ -130,17 +130,21 @@ These summaries let the AI say things like:
 
 ## 🩺 Health Data Used
 
-The app reads and summarizes up to ~18 months of:
+The app aggregates (weekly over 18 months on first sync, daily for the last month afterwards):
 
 * Body Mass (Weight)
 * Step Count
 * Active Energy Burned
+* Basal Energy Burned
 * Heart Rate
 * Resting Heart Rate
 * Walking Heart Rate Average
 * VO₂ Max
 * Flights Climbed
 * Distance (Walking/Running)
+* Exercise Minutes
+* Walking Speed
+* Workouts (type, duration, calories)
 
 The backend stores **snapshots of these summaries** along with each chat, so it can reconstruct trends and generate meaningful long-term summaries.
 
@@ -213,6 +217,7 @@ The **system prompt** instructs the model to:
 | AI Assistant       | Azure OpenAI GPT-4o                      |
 | Database           | Azure Database for PostgreSQL            |
 | Container Registry | Azure Container Registry (ACR)           |
+| CI/CD              | Xcode Cloud (push to `main` → TestFlight) |
 
 
 ---
@@ -236,6 +241,7 @@ The **system prompt** instructs the model to:
 
 ## 🔭 Roadmap
 
+* ✅ Weekly/daily aggregation to keep payloads within the LLM token limit (v2.1)
 * 🔁 Better weekly/monthly insight summaries
 * 💤 Sleep integration and recovery-oriented coaching
 * 📊 Streaks, milestones, and motivational UI
